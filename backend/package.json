@@ -1,0 +1,14 @@
+{
+  "name": "listennow-backend",
+  "version": "0.1.0",
+  "description": "ContentSources backend for ListenNow — normalizes content from multiple sources behind one API, keeping all API keys server-side.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}

@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: listennow-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    plan: free
+    envVars:
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: NEWS_API_KEY
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: NODE_ENV
+        value: production
