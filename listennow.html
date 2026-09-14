@@ -213,6 +213,18 @@
     width:100%;aspect-ratio:2.2/1;border-radius:16px;display:flex;align-items:center;justify-content:center;
     font-size:44px;margin-bottom:16px;background:linear-gradient(135deg,var(--surface-3),var(--surface-2));
   }
+  .player-video-wrap{
+    width:100%;aspect-ratio:16/9;border-radius:16px;overflow:hidden;margin-bottom:16px;background:#000;
+    position:relative;
+  }
+  .player-video-wrap iframe{width:100%;height:100%;display:block;border:0;}
+  .player-no-embed{
+    width:100%;aspect-ratio:16/9;border-radius:16px;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:8px;margin-bottom:16px;background:linear-gradient(135deg,var(--surface-3),var(--surface-2));
+    text-align:center;padding:16px;
+  }
+  .player-no-embed .pne-emoji{font-size:32px;}
+  .player-no-embed .pne-text{font-size:12.5px;color:var(--text-dim);line-height:1.5;max-width:280px;}
   .player-title{font-family:'Rubik',sans-serif;font-weight:700;font-size:18px;line-height:1.4;margin-bottom:4px;}
   .player-meta{font-size:13px;color:var(--text-dim);margin-bottom:16px;}
   .player-progress-track{height:6px;border-radius:6px;background:var(--surface-2);overflow:hidden;margin-bottom:6px;}
@@ -223,6 +235,7 @@
     width:60px;height:60px;border-radius:50%;background:var(--accent);border:none;font-size:22px;
     display:flex;align-items:center;justify-content:center;cursor:pointer;color:#1a1305;
   }
+  .player-play-btn:disabled{opacity:.35;cursor:not-allowed;}
   .player-side-btn{
     width:44px;height:44px;border-radius:50%;background:var(--surface-2);border:1px solid var(--surface-3);
     font-size:16px;color:var(--text-dim);cursor:pointer;
@@ -249,6 +262,8 @@
 </head>
 <body>
 <div id="app"></div>
+<div id="player-holder"></div>
+<script src="https://www.youtube.com/iframe_api"></script>
 
 <script>
 /* =========================================================================================
@@ -538,10 +553,16 @@ const state = {
   playlistIndex: 0,
   player: null,             // currently playing item
   playerProgress: 0,
-  playerTimer: null,
   toast: null,
   newInterestInput: "",
-  headline: "תפסיק לחפש. תתחיל להקשיב."
+  headline: "תפסיק לחפש. תתחיל להקשיב.",
+  // --- real YouTube IFrame Player state ---
+  ytPlayer: null,           // the live YT.Player instance, or null
+  ytApiReady: false,        // set true by onYouTubeIframeAPIReady()
+  pendingVideoId: null,     // queued video if openPlayer() ran before the API finished loading
+  pendingStartSeconds: 0,
+  progressPollTimer: null,  // polls real playback position for the progress bar (visual only)
+  playerVideoId: null       // extracted YouTube video id for the open item, or null if not embeddable
 };
 
 function setScreen(s){ state.screen = s; render(); window.scrollTo(0,0); }
@@ -803,64 +824,181 @@ function skipItem(id){
   render();
 }
 
-/* ---------- player ---------- */
+/* ---------- player: real YouTube IFrame Player API ---------- */
+
+// The YouTube API script (loaded in <body>) calls this global when ready.
+// If a video was requested before the API finished loading, mount it now.
+function onYouTubeIframeAPIReady(){
+  state.ytApiReady = true;
+  if(state.pendingVideoId){
+    mountYouTubePlayer(state.pendingVideoId, state.pendingStartSeconds || 0);
+    state.pendingVideoId = null;
+  }
+}
+
+function extractYouTubeId(url){
+  if(!url) return null;
+  const m = /[?&]v=([a-zA-Z0-9_-]{11})/.exec(url) || /youtu\.be\/([a-zA-Z0-9_-]{11})/.exec(url);
+  return m ? m[1] : null;
+}
+
+function fmtSeconds(s){
+  s = Math.max(0, Math.floor(s || 0));
+  const m = Math.floor(s / 60), sec = s % 60;
+  return `${m}:${String(sec).padStart(2,'0')}`;
+}
+
 function openPlayer(id, isSurprise, fromPlaylist){
   const item = CONTENT_SEED.find(i=>i.id===id);
   ConsumptionHistory.markStarted(item);
+  destroyYtPlayer(); // in case a previous session is somehow still mounted
   state.player = item;
+  state.playerVideoId = extractYouTubeId(item.url);
+  // Resume near where a partially-heard item left off, in real seconds.
+  const startSeconds = item.progress && item.progress < 95
+    ? Math.floor((item.progress/100) * item.duration * 60) : 0;
   state.playerProgress = item.progress && item.progress < 95 ? item.progress : 0;
   state.playerIsSurprise = !!isSurprise;
   // Explicit flag for "is this player session actually part of an
-  // active playlist run" — NOT inferred from whether this item's id
-  // happens to also appear in state.playlist.items, which caused
-  // false positives (e.g. "Surprise me" picking an item that
-  // coincidentally overlapped with an old playlist, silently
-  // auto-chaining into it on completion).
+  // active playlist run" — NOT inferred from item-id membership, which
+  // previously caused false positives (e.g. "Surprise me" picking an
+  // item that coincidentally overlapped with an old playlist).
   state.playerFromPlaylist = !!fromPlaylist;
-  state.playerPlaying = true;
+  state.playerPlaying = false; // becomes true once the real player actually starts
   render();
-  runPlayerTick();
-}
-function runPlayerTick(){
-  clearInterval(state.playerTimer);
-  state.playerTimer = setInterval(() => {
-    if(!state.player || !state.playerPlaying) return;
-    state.playerProgress = Math.min(100, state.playerProgress + 4);
-    ConsumptionHistory.markProgress(state.player, state.playerProgress);
-    if(state.playerProgress >= 100){
-      clearInterval(state.playerTimer);
-      finishPlayer();
-      return;
+  showPlayerShell();
+
+  if(state.playerVideoId){
+    if(state.ytApiReady){
+      mountYouTubePlayer(state.playerVideoId, startSeconds);
+    } else {
+      state.pendingVideoId = state.playerVideoId;
+      state.pendingStartSeconds = startSeconds;
     }
-    renderPlayerOnly();
-  }, 250);
+  }
+  // If there's no extractable YouTube id (local fallback/demo data, or
+  // the backend's mock-fallback items), renderPlayer() shows an honest
+  // "no embed available for this demo item" state instead — see below.
 }
-function togglePlay(){
-  state.playerPlaying = !state.playerPlaying;
-  render();
+
+function mountYouTubePlayer(videoId, startSeconds){
+  const target = document.getElementById('yt-player-target');
+  if(!target) return; // player was closed before the API finished loading
+  state.ytPlayer = new YT.Player(target, {
+    videoId,
+    playerVars: { autoplay: 1, rel: 0, modestbranding: 1, start: startSeconds || 0 },
+    events: {
+      onReady: () => { startProgressPoll(); },
+      onStateChange: onYtStateChange,
+      onError: onYtError
+    }
+  });
 }
-function finishPlayer(){
+
+function onYtStateChange(e){
+  if(!state.player) return; // player already closed
+  if(e.data === YT.PlayerState.PLAYING){
+    state.playerPlaying = true;
+    updatePlayPauseIcon();
+    startProgressPoll();
+  } else if(e.data === YT.PlayerState.PAUSED){
+    state.playerPlaying = false;
+    updatePlayPauseIcon();
+  } else if(e.data === YT.PlayerState.ENDED){
+    stopProgressPoll();
+    const item = state.player;
+    ConsumptionHistory.markProgress(item, 100);
+    destroyYtPlayer();
+    closePlayer(true); // natural completion — auto-advance if this was a playlist item
+    showToast(`✅ "${item.title}" הושלם — לא יומלץ שוב`);
+  }
+}
+
+function onYtError(){
+  // Common cause: the video owner disabled embedding (codes 101/150),
+  // or the video is private/removed. We don't pretend it's playing —
+  // tell the person plainly and point them at the real source instead.
+  showToast("⚠️ אי אפשר להטמיע את הסרטון הזה כאן — לחץ/י על 'פתח מקור' לצפייה ב-YouTube");
+  stopProgressPoll();
+}
+
+function startProgressPoll(){
+  stopProgressPoll();
+  state.progressPollTimer = setInterval(() => {
+    if(!state.ytPlayer || !state.player) return;
+    let dur, cur;
+    try{
+      dur = state.ytPlayer.getDuration();
+      cur = state.ytPlayer.getCurrentTime();
+    }catch(e){ return; }
+    if(dur > 0){
+      const pct = Math.min(100, Math.round((cur/dur)*100));
+      state.playerProgress = pct;
+      ConsumptionHistory.markProgress(state.player, pct);
+      updateProgressUI(cur, dur, pct);
+    }
+  }, 1000);
+}
+function stopProgressPoll(){
+  clearInterval(state.progressPollTimer);
+  state.progressPollTimer = null;
+}
+function destroyYtPlayer(){
+  stopProgressPoll();
+  if(state.ytPlayer){
+    try{ state.ytPlayer.destroy(); }catch(e){}
+    state.ytPlayer = null;
+  }
+}
+
+// ---- targeted DOM updates that never touch #yt-player-target, so the
+// live iframe (and its playback) survives every one of these. ----
+function updateProgressUI(cur, dur, pct){
+  const fill = document.getElementById('player-progress-fill');
+  if(fill) fill.style.width = pct + '%';
+  const curEl = document.getElementById('player-time-current');
+  if(curEl) curEl.textContent = fmtSeconds(cur);
+  const totalEl = document.getElementById('player-time-total');
+  if(totalEl) totalEl.textContent = fmtSeconds(dur);
+}
+function updatePlayPauseIcon(){
+  const btn = document.getElementById('player-play-btn');
+  if(btn) btn.textContent = state.playerPlaying ? '⏸️' : '▶️';
+}
+function rateItemInPlayer(id, rating){
+  rateItem(id, rating); // updates data + shows a toast (safe: toasts no longer touch #player-holder)
   const item = state.player;
-  closePlayer(true); // natural completion — auto-advance if this was a playlist item
-  showToast(`✅ "${item.title}" הושלם — לא יומלץ שוב`);
+  if(!item) return;
+  const likeBtn = document.getElementById('player-like-btn');
+  const dislikeBtn = document.getElementById('player-dislike-btn');
+  if(likeBtn) likeBtn.classList.toggle('liked', item.userRating === 'liked');
+  if(dislikeBtn) dislikeBtn.classList.toggle('disliked', item.userRating === 'disliked');
+}
+
+function togglePlay(){
+  if(!state.ytPlayer) return; // no real player mounted (fallback/no-embed state) — nothing to control
+  if(state.playerPlaying){ state.ytPlayer.pauseVideo(); } else { state.ytPlayer.playVideo(); }
+  // state.playerPlaying itself updates from the real onStateChange event, not here —
+  // that keeps the icon honest with what the player is actually doing.
 }
 function skipInPlayer(){
   ConsumptionHistory.markSkipped(state.player);
+  destroyYtPlayer();
   closePlayer(false); // user chose to skip and exit — don't auto-chain into the playlist
   showToast("⏭️ דילגת — נזכור את זה");
 }
 function closePlayer(shouldAdvance){
-  clearInterval(state.playerTimer);
+  destroyYtPlayer();
   const wasFromPlaylist = state.playerFromPlaylist;
   state.player = null;
+  hidePlayerShell();
   if(shouldAdvance && wasFromPlaylist && state.playlistActive){
     advancePlaylist();
   } else {
     // Any manual close (✕/סגור button, clicking outside the player)
     // ends playlist auto-advance mode — otherwise it stays stuck "on"
     // and silently chain-plays the next playlist item the next time
-    // ANY unrelated card is opened and finished, which looks like a
-    // runaway open/close loop.
+    // ANY unrelated card is opened and finished.
     state.playlistActive = false;
     render();
   }
@@ -887,31 +1025,46 @@ function renderPlayer(){
   if(!state.player) return "";
   const item = state.player;
   const color = CATEGORY_COLORS[item.category] || "#888";
+  const hasVideo = !!state.playerVideoId;
+  const videoArea = hasVideo
+    ? `<div class="player-video-wrap"><div id="yt-player-target"></div></div>`
+    : `<div class="player-no-embed">
+         <div class="pne-emoji">${CATEGORY_ICONS[item.category]||'🎧'}</div>
+         <div class="pne-text">אין נגן זמין להטמעה עבור התוכן הזה (נתון דמו מקומי, לא סרטון YouTube אמיתי) — אפשר לפתוח את המקור.</div>
+       </div>`;
   return `
   <div class="overlay" onclick="if(event.target===this) closePlayer()">
     <div class="player-sheet">
       ${state.playerIsSurprise ? `<div class="hero-eyebrow" style="margin-bottom:10px;">🎲 הפתעה בשבילך</div>` : ''}
-      <div class="player-art" style="background:linear-gradient(135deg,${color}33,${color}11)">${CATEGORY_ICONS[item.category]||'🎧'}</div>
+      ${videoArea}
       <div class="player-title">${item.title}</div>
       <div class="player-meta">${SOURCE_ICONS[item.source]} ${item.source} · ${item.category} · ${fmtDuration(item.duration)}</div>
-      <div class="player-progress-track"><div class="player-progress-fill" style="width:${state.playerProgress}%"></div></div>
-      <div class="player-times"><span>${Math.round(item.duration*state.playerProgress/100)} דק׳</span><span>${fmtDuration(item.duration)}</span></div>
+      <div class="player-progress-track"><div id="player-progress-fill" class="player-progress-fill" style="width:${state.playerProgress}%"></div></div>
+      <div class="player-times"><span id="player-time-current">0:00</span><span id="player-time-total">${fmtDuration(item.duration)}</span></div>
       <div class="player-controls">
         <button class="player-side-btn" onclick="skipInPlayer()">⏭️</button>
-        <button class="player-play-btn" onclick="togglePlay()">${state.playerPlaying ? '⏸️' : '▶️'}</button>
+        <button id="player-play-btn" class="player-play-btn" onclick="togglePlay()" ${hasVideo?'':'disabled'}>${state.playerPlaying ? '⏸️' : '▶️'}</button>
         <a class="player-side-btn" style="display:flex;align-items:center;justify-content:center;text-decoration:none;" href="${item.url}" target="_blank" title="פתח תוכן מקורי">↗️</a>
       </div>
       <div class="player-actions">
-        <button class="btn-icon ${item.userRating==='liked'?'liked':''}" style="flex:1;border-radius:100px;" onclick="rateItem(${item.id},'liked'); renderPlayerOnly();">❤️ מעניין אותי</button>
-        <button class="btn-icon ${item.userRating==='disliked'?'disliked':''}" style="flex:1;border-radius:100px;" onclick="rateItem(${item.id},'disliked'); renderPlayerOnly();">👎 פחות</button>
+        <button id="player-like-btn" class="btn-icon ${item.userRating==='liked'?'liked':''}" style="flex:1;border-radius:100px;" onclick="rateItemInPlayer(${item.id},'liked')">❤️ מעניין אותי</button>
+        <button id="player-dislike-btn" class="btn-icon ${item.userRating==='disliked'?'disliked':''}" style="flex:1;border-radius:100px;" onclick="rateItemInPlayer(${item.id},'disliked')">👎 פחות</button>
       </div>
       <button class="btn btn-ghost btn-block" style="margin-top:12px;" onclick="closePlayer()">סגור</button>
     </div>
   </div>`;
 }
-function renderPlayerOnly(){
+// #player-holder lives OUTSIDE #app in the static HTML shell (see
+// <body>) specifically so the main render() below never touches it —
+// that's what lets a live YouTube iframe survive every other re-render
+// (toasts, like/dislike, nav changes) while the player is open.
+function showPlayerShell(){
   const holder = document.getElementById("player-holder");
   if(holder) holder.innerHTML = renderPlayer();
+}
+function hidePlayerShell(){
+  const holder = document.getElementById("player-holder");
+  if(holder) holder.innerHTML = "";
 }
 
 /* ---------- nav ---------- */
@@ -988,8 +1141,12 @@ function render(){
     </div>
     ${renderNav()}
     ${state.toast ? `<div class="toast">${state.toast}</div>` : ''}
-    <div id="player-holder">${renderPlayer()}</div>
   `;
+  // #player-holder is a sibling of #app (see <body>) and is deliberately
+  // NEVER touched here — see showPlayerShell()/hidePlayerShell() above.
+  // This is what lets a live YouTube iframe survive every render() call
+  // triggered while the player is open (toasts, like/dislike, etc.)
+  // instead of being destroyed and restarted.
 }
 
 render();
