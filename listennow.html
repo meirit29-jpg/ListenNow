@@ -344,7 +344,7 @@ let CONTENT_SEED = LOCAL_FALLBACK_RAW.map(it => ({
    The frontend never calls YouTube/RSS/etc. directly; it only ever fetches this one
    endpoint. Change API_BASE_URL if the backend runs somewhere other than localhost:3000.
    ========================================================================================= */
-const API_BASE_URL = "http://localhost:3000";
+const API_BASE_URL = "https://listennow.onrender.com";
 
 function normalizeRemoteItems(items){
   // Backend items only carry content facts (see contentItem.schema.js) —
@@ -834,21 +834,27 @@ function togglePlay(){
 }
 function finishPlayer(){
   const item = state.player;
-  closePlayer(false);
+  closePlayer(true); // natural completion — auto-advance if this was a playlist item
   showToast(`✅ "${item.title}" הושלם — לא יומלץ שוב`);
 }
 function skipInPlayer(){
   ConsumptionHistory.markSkipped(state.player);
-  closePlayer(false);
+  closePlayer(false); // user chose to skip and exit — don't auto-chain into the playlist
   showToast("⏭️ דילגת — נזכור את זה");
 }
-function closePlayer(){
+function closePlayer(shouldAdvance){
   clearInterval(state.playerTimer);
   const wasFromPlaylist = state.playlist && state.player && state.playlist.items.some(i=>i.id===state.player.id);
   state.player = null;
-  if(wasFromPlaylist && state.playlistActive){
+  if(shouldAdvance && wasFromPlaylist && state.playlistActive){
     advancePlaylist();
   } else {
+    // Any manual close (✕/סגור button, clicking outside the player)
+    // ends playlist auto-advance mode — otherwise it stays stuck "on"
+    // and silently chain-plays the next playlist item the next time
+    // ANY unrelated card is opened and finished, which looks like a
+    // runaway open/close loop.
+    state.playlistActive = false;
     render();
   }
 }
