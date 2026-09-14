@@ -804,12 +804,19 @@ function skipItem(id){
 }
 
 /* ---------- player ---------- */
-function openPlayer(id, isSurprise){
+function openPlayer(id, isSurprise, fromPlaylist){
   const item = CONTENT_SEED.find(i=>i.id===id);
   ConsumptionHistory.markStarted(item);
   state.player = item;
   state.playerProgress = item.progress && item.progress < 95 ? item.progress : 0;
   state.playerIsSurprise = !!isSurprise;
+  // Explicit flag for "is this player session actually part of an
+  // active playlist run" — NOT inferred from whether this item's id
+  // happens to also appear in state.playlist.items, which caused
+  // false positives (e.g. "Surprise me" picking an item that
+  // coincidentally overlapped with an old playlist, silently
+  // auto-chaining into it on completion).
+  state.playerFromPlaylist = !!fromPlaylist;
   state.playerPlaying = true;
   render();
   runPlayerTick();
@@ -844,7 +851,7 @@ function skipInPlayer(){
 }
 function closePlayer(shouldAdvance){
   clearInterval(state.playerTimer);
-  const wasFromPlaylist = state.playlist && state.player && state.playlist.items.some(i=>i.id===state.player.id);
+  const wasFromPlaylist = state.playerFromPlaylist;
   state.player = null;
   if(shouldAdvance && wasFromPlaylist && state.playlistActive){
     advancePlaylist();
@@ -862,12 +869,12 @@ function startPlaylist(){
   if(!state.playlist || state.playlist.items.length===0) return;
   state.playlistActive = true;
   state.playlistIndex = 0;
-  openPlayer(state.playlist.items[0].id);
+  openPlayer(state.playlist.items[0].id, false, true);
 }
 function advancePlaylist(){
   state.playlistIndex++;
   if(state.playlist && state.playlistIndex < state.playlist.items.length){
-    openPlayer(state.playlist.items[state.playlistIndex].id);
+    openPlayer(state.playlist.items[state.playlistIndex].id, false, true);
   } else {
     state.playlistActive = false;
     state.playlist = null;
